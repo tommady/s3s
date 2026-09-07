@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: 2026 The s3s Authors
+// SPDX-FileCopyrightText: 2023-2026 The s3s Authors
 
 use bytes::{Buf, Bytes};
 use h3::client::RequestStream;
@@ -102,6 +102,7 @@ fn unsigned_aws_chunked_body(data: &[u8], checksum: &str) -> Bytes {
 }
 
 fn server_endpoint() -> TestResult<(s3s_http3::Endpoint, CertificateDer<'static>)> {
+    let _ = quinn::rustls::crypto::ring::default_provider().install_default();
     let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])?;
     let certificate_der = certificate.cert.der().clone();
     let private_key = PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der());
@@ -366,7 +367,7 @@ async fn large_object(client: &mut Client) -> TestResult {
     .await?;
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(body.is_empty());
+    assert_eq!(body, [] as [u8; 0]);
     assert!(trailers.is_none());
 
     let (response, body, trailers) = send(
@@ -418,7 +419,7 @@ async fn multipart_upload(client: &mut Client) -> TestResult {
     .await?;
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(body.is_empty());
+    assert_eq!(body, [] as [u8; 0]);
     assert!(trailers.is_none());
     assert_no_hop_by_hop_headers(&response);
 
@@ -527,7 +528,7 @@ async fn streaming_checksum_put(client: &mut Client) -> TestResult {
     let (response, body, trailers) = send(client, request, std::iter::once(encoded_body)).await?;
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(body.is_empty());
+    assert_eq!(body, [] as [u8; 0]);
     assert!(trailers.is_none());
     assert_eq!(
         response
@@ -709,7 +710,7 @@ async fn serves_put_and_get_over_http3() -> TestResult {
         tokio::time::timeout(std::time::Duration::from_secs(2), receive_response(active_stream)).await??;
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(body.is_empty());
+    assert_eq!(body, [] as [u8; 0]);
     assert!(trailers.is_none());
     assert_no_hop_by_hop_headers(&response);
 
@@ -775,7 +776,7 @@ async fn preserves_sigv4_authority_over_http3() -> TestResult {
     .await?;
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(body.is_empty());
+    assert_eq!(body, [] as [u8; 0]);
     assert!(trailers.is_none());
     assert_no_hop_by_hop_headers(&response);
 
@@ -795,7 +796,7 @@ async fn preserves_sigv4_authority_over_http3() -> TestResult {
     .await?;
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(body.is_empty());
+    assert_eq!(body, [] as [u8; 0]);
     assert!(trailers.is_none());
     assert_no_hop_by_hop_headers(&response);
 

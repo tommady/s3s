@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: 2026 The s3s Authors
+// SPDX-FileCopyrightText: 2023-2026 The s3s Authors
 
 use quinn::rustls::pki_types::pem::PemObject;
 use quinn::rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -47,6 +47,7 @@ fn load_server_config(cert_path: &Path, key_path: &Path) -> Result<quinn::Server
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result {
+    let _ = quinn::rustls::crypto::ring::default_provider().install_default();
     let root = env_path("S3S_HTTP3_ROOT", "target/s3s-http3-data");
     let cert = env_path("S3S_HTTP3_CERT", "cert.pem");
     let key = env_path("S3S_HTTP3_KEY", "key.pem");

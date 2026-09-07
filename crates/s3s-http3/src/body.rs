@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: 2026 The s3s Authors
+// SPDX-FileCopyrightText: 2023-2026 The s3s Authors
 
 use bytes::{Buf, Bytes};
 use h3::server::RequestStream;
-use http::StatusCode;
 use http_body::{Body as HttpBody, Frame, SizeHint};
 
 use std::pin::Pin;
