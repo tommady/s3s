@@ -35,3 +35,11 @@ s3s-fs = { version = "0.15.0", path = "../s3s-fs" }
 s3s-sigv4 = { version = "0.16.0-alpha.1", path = "../s3s-sigv4" }
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
 rcgen = "0.14.10"
+hyper = { workspace = true, features = ["http2", "server"] }
+hyper-util = { workspace = true, features = [
+      "server-auto",
+      "server-graceful",
+      "http2",
+      "tokio",
+] }
+tokio-rustls.workspace = true
