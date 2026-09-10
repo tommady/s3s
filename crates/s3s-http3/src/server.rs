@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::body::Body;
 
-/// Maximum time allowed for active HTTP/3 requests to drain during shutdown.
+/// Maximum time allowed for HTTP/3 connections to drain and close during shutdown.
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 type Resolver = RequestResolver<h3_quinn::Connection, Bytes>;
@@ -29,8 +29,9 @@ type SendStream = RequestStream<h3_quinn::SendStream<Bytes>, Bytes>;
 /// Serves an [`S3Service`] on a configured QUIC [`Endpoint`].
 ///
 /// The endpoint must already be configured with TLS 1.3 and the `h3` ALPN
-/// protocol. The shutdown future stops new connections, gracefully drains
-/// existing requests, and closes the endpoint after the shutdown timeout.
+/// protocol. The shutdown future stops new connections, sends GOAWAY, and
+/// waits for clients to finish reading responses and close their connections.
+/// Connections still open after [`DEFAULT_SHUTDOWN_TIMEOUT`] are forcibly closed.
 pub async fn serve<F>(endpoint: Endpoint, service: S3Service, shutdown: F)
 where
     F: Future<Output = ()>,
@@ -59,17 +60,15 @@ where
     let drain = async {
         while let Some(result) = connections.join_next().await {
             if let Err(error) = result {
-                error!(?error, "HTTP/3 connection taks failed while draining");
+                error!(?error, "HTTP/3 connection task failed while draining");
             }
         }
     };
 
     if tokio::time::timeout(DEFAULT_SHUTDOWN_TIMEOUT, drain).await.is_err() {
         warn!("HTTP/3 shutdown timed out; closing endpoint");
-        endpoint.close(VarInt::from_u32(0), b"server shutdown");
-    } else {
-        endpoint.close(VarInt::from_u32(0), b"server shutdown");
     }
+    endpoint.close(VarInt::from_u32(0), b"server shutdown");
 }
 
 async fn handle_incoming(incoming: Incoming, service: S3Service, cancellation: CancellationToken) {
@@ -92,13 +91,14 @@ async fn handle_incoming(incoming: Incoming, service: S3Service, cancellation: C
 }
 
 async fn handle_connection(
-    connection: quinn::Connection,
+    quic: quinn::Connection,
     service: S3Service,
     cancellation: CancellationToken,
 ) -> Result<(), h3::error::ConnectionError> {
-    let c = h3_quinn::Connection::new(connection);
+    let c = h3_quinn::Connection::new(quic.clone());
     let mut connection = h3::server::builder().build(c).await?;
     let mut requests: JoinSet<()> = JoinSet::new();
+    let mut shutting_down = false;
 
     loop {
         tokio::select! {
@@ -106,28 +106,30 @@ async fn handle_connection(
                 Some(resolver) => {
                     requests.spawn(handle_request(resolver, service.clone()));
                 }
-                None => return Ok(()),
+                None => break,
             },
             joined = requests.join_next(), if !requests.is_empty() => {
                 if let Some(Err(error)) = joined {
                     error!(?error, "HTTP/3 request task failed");
                 }
             },
-            () = cancellation.cancelled() => {
+            () = cancellation.cancelled(), if !shutting_down => {
+                shutting_down = true;
                 connection.shutdown(0).await?;
-
-                while let Some(result) = requests.join_next().await {
-                    if let Err(error) = result {
-                        error!(?error, "HTTP/3 request task failed while draining");
-                    }
-                }
-
-                while connection.accept().await?.is_some() {}
-
-                return Ok(());
             }
         }
     }
+
+    while let Some(result) = requests.join_next().await {
+        if let Err(error) = result {
+            error!(?error, "HTTP/3 request task failed while draining");
+        }
+    }
+
+    // finish() only queues bytes. Dropping the h3 connection closes QUIC and can
+    // discard unread responses, so let the peer close first. serve() bounds this wait.
+    let _ = quic.closed().await;
+    Ok(())
 }
 
 async fn handle_request(resolver: Resolver, service: S3Service) {
@@ -140,7 +142,12 @@ async fn handle_request(resolver: Resolver, service: S3Service) {
     };
 
     let (send_stream, recv_stream) = stream.split();
-    let request = request.map(|()| Body::new(recv_stream));
+    let content_length = request
+        .headers()
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok());
+    let request = request.map(|()| Body::new(recv_stream, content_length));
 
     let mut service = service;
 
@@ -183,6 +190,8 @@ async fn send_response(mut stream: SendStream, response: HttpResponse) {
                 }
                 Err(frame) => {
                     if let Ok(trailers) = frame.into_trailers() {
+                        let mut trailers = trailers;
+                        strip_hop_by_hop_headers(&mut trailers);
                         if let Err(error) = stream.send_trailers(trailers).await {
                             error!(?error, "failed to send HTTP/3 response trailers");
                             return;

@@ -617,6 +617,64 @@ async fn request_stream_reset(client: &mut Client) -> TestResult {
     Ok(())
 }
 
+async fn content_length_mismatch(client: &mut Client) -> TestResult {
+    for (key, length, body) in [
+        ("short", "2", Bytes::from_static(b"x")),
+        ("long", "1", Bytes::from_static(b"xy")),
+    ] {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            send(
+                client,
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("http://localhost/bucket/{key}"))
+                    .header("content-length", length)
+                    .body(())?,
+                std::iter::once(body),
+            ),
+        )
+        .await?;
+
+        match result {
+            Ok((response, body, trailers)) => {
+                // s3s-fs maps the transport body error to an S3 InternalError.
+                assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR, "{key}");
+                assert!(String::from_utf8(body)?.contains("<Code>InternalError</Code>"), "{key}");
+                assert!(trailers.is_none(), "{key}");
+            }
+            Err(error) => {
+                assert!(
+                    matches!(
+                        error.downcast_ref::<h3::error::StreamError>(),
+                        Some(h3::error::StreamError::RemoteTerminate { code, .. })
+                            if *code == h3::error::Code::H3_MESSAGE_ERROR
+                    ),
+                    "{key}: unexpected upload error: {error:?}",
+                );
+            }
+        }
+
+        // A rejected upload must not be published, and the connection must remain usable.
+        let (response, body, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            send(
+                client,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("http://localhost/bucket/{key}"))
+                    .body(())?,
+                std::iter::empty::<Bytes>(),
+            ),
+        )
+        .await??;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{key}: malformed upload was stored");
+        assert!(String::from_utf8(body)?.contains("<Code>NoSuchKey</Code>"), "{key}");
+    }
+
+    Ok(())
+}
+
 struct CleanupGuard<'a> {
     path: &'a Path,
 }
@@ -663,6 +721,7 @@ async fn serves_put_and_get_over_http3() -> TestResult {
 
     object_operations(&mut send_request).await?;
     request_stream_reset(&mut send_request).await?;
+    content_length_mismatch(&mut send_request).await?;
     large_object(&mut send_request).await?;
     multipart_upload(&mut send_request).await?;
     concurrent_gets(&send_request).await?;
@@ -705,6 +764,14 @@ async fn serves_put_and_get_over_http3() -> TestResult {
 
     active_stream.send_data(Bytes::from_static(b"c")).await?;
     active_stream.finish().await?;
+
+    // Delay reading the final response: queuing it must not close the connection.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut server_task)
+            .await
+            .is_err(),
+        "server closed before the client read the final response",
+    );
 
     let (response, body, trailers) =
         tokio::time::timeout(std::time::Duration::from_secs(2), receive_response(active_stream)).await??;
