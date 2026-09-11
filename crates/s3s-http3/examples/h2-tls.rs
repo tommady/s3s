@@ -47,7 +47,9 @@ fn load_tls_config(cert_path: &Path, key_path: &Path) -> Result<rustls::ServerCo
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install ring TLS provider");
 
     let root = env_path("S3S_HTTP2_ROOT", "target/s3s-http2-data");
     let cert = env_path("S3S_HTTP2_CERT", "cert.pem");
